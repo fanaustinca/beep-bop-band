@@ -111,7 +111,8 @@ export class AudioEngine {
     this.voices = new Map(); // robot uid → { voice, channel, send, preset }
     this.step = 0;
     this.playing = false;
-    this.onStep = null; // (step, events, time) called on the animation frame of that step
+    this.onStep = null; // (step, events, dur) called on the animation frame of that step (visuals)
+    this.onLogicStep = null; // (step) called on the audio clock for every step (game logic)
     this.onEnded = null;
     this.onLoop = null;
     this.volume = 0;
@@ -121,6 +122,7 @@ export class AudioEngine {
     if (this.ready) return;
     await Tone.start();
     Tone.getContext().lookAhead = 0.08;
+    Tone.getDraw().expiration = 0.5;
     this.master = new Tone.Volume(this.volume);
     const comp = new Tone.Compressor(-16, 3), limiter = new Tone.Limiter(-1);
     this.master.chain(comp, limiter, Tone.getDestination());
@@ -191,6 +193,8 @@ export class AudioEngine {
       return;
     }
     if (step === 0 && this._played) Tone.getDraw().schedule(() => this.onLoop && this.onLoop(), time);
+    // game logic runs on the audio clock (never dropped); visuals go through Tone.Draw below
+    if (this.onLogicStep) this.onLogicStep(step);
     const events = song.stepTable()[step] || [];
     const dur = song.stepSeconds;
     for (const e of events) {

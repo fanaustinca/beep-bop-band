@@ -83,7 +83,7 @@ await T('clicking 4 grid cells satisfies the request, a full loop wins the show'
   assert(st.notes === 4, 'notes placed: ' + st.notes);
   assert(st.ok, 'request not satisfied');
   await E(() => RO.simulateSteps(RO.S.song.steps + 1));
-  await sleep(1200);
+  await page.waitForFunction(() => document.getElementById('win').classList.contains('show'), { timeout: 30000 }).catch(() => {});
   const w = await E(() => ({ won: RO.S.won, modal: document.getElementById('win').classList.contains('show'), stars: JSON.parse(localStorage.getItem('robot-orchestra.progress')).stars[1] }));
   assert(w.won && w.modal, 'win modal not shown');
   assert(w.stars === 3, 'expected 3 stars, got ' + w.stars);
@@ -135,20 +135,22 @@ await T('Tone.js clock drives the robots on the beat', async () => {
   await page.mouse.click(5, 5); // user gesture
   const r = await E(async () => {
     await RO.ensureAudio();
-    let steps = 0, hits = 0;
-    const orig = RO.audio.onStep;
-    RO.audio.onStep = (s, ev, d) => { steps++; hits += ev.length; orig(s, ev, d); };
+    let steps = 0, hits = 0, frames = 0;
+    const orig = RO.audio.onStep, origL = RO.audio.onLogicStep;
+    RO.audio.onLogicStep = (st) => { steps++; hits += RO.S.song.stepTable()[st].length; origL(st); };
+    RO.audio.onStep = (s, ev, d) => { frames++; orig(s, ev, d); };
     RO.setPlaying(true);
     await new Promise((res) => setTimeout(res, 2500));
     RO.setPlaying(false);
-    RO.audio.onStep = orig;
-    return { steps, hits, voices: RO.audio.voices.size, ctx: RO.audio.ready, piano: !!RO.audio.pianoBuffers, bpm: RO.S.song.settings.bpm };
+    RO.audio.onStep = orig; RO.audio.onLogicStep = origL;
+    return { steps, hits, frames, voices: RO.audio.voices.size, ctx: RO.audio.ready, piano: !!RO.audio.pianoBuffers, bpm: RO.S.song.settings.bpm };
   });
   assert(r.ctx, 'audio not ready');
   assert(r.piano, 'piano samples failed to load');
   assert(r.voices === 4, 'expected 4 voices, got ' + r.voices);
   const expected = 2.5 * (r.bpm / 60) * 2; // eighth-note steps in 2.5 s
-  assert(r.steps >= expected * 0.4, `only ${r.steps} steps in 2.5s (expected ~${expected.toFixed(0)})`);
+  assert(r.frames > 0, 'no visual step callbacks reached the robots');
+  assert(r.steps >= expected * 0.7, `only ${r.steps} steps in 2.5s (expected ~${expected.toFixed(0)})`);
   assert(r.hits > 0, 'no notes triggered');
 });
 

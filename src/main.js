@@ -53,13 +53,15 @@ audio.onStep = (step, events, dur) => {
     per.set(e.r.uid, p);
   }
   for (const [uid, p] of per) { stage.hit(uid, Math.min(1, 0.7 + p.n * 0.15), p.h, dur); flashRoster(uid); }
-  if (S.mode === 'level' && !S.won) {
-    if (S.allOk) {
-      S.perf++;
-      if (S.perf >= S.song.steps) win();
-    } else S.perf = 0;
-    renderMeter();
-  }
+};
+// the audience counts the performance on the audio clock, so slow frames can't cost you a win
+audio.onLogicStep = () => {
+  if (!S.song || S.mode !== 'level' || S.won) return;
+  if (S.allOk) {
+    S.perf++;
+    if (S.perf >= S.song.steps) win();
+  } else S.perf = 0;
+  renderMeter();
 };
 audio.onEnded = () => { setPlaying(false); };
 const rowHeight = (r, row) => (S.song.isMelodic(r) ? row / Math.max(1, S.song.rows(r) - 1) : 0.5);
@@ -536,5 +538,5 @@ window.RO = {
   startLevel, startFree, select, evaluate, undo, openLevels, openPicker, ensureAudio, setPlaying,
   solveAll() { for (let k = 0; k < 6; k++) for (const q of S.level.requests) solve(S.song, q); S.song.touch(); audio.settingsChanged(); syncControls(); seq.refresh(); renderRoster(); evaluate(); },
   /** Simulate the clock advancing n steps without audio (for headless tests). */
-  simulateSteps(n) { for (let i = 0; i < n; i++) { const st = i % S.song.steps; audio.onStep(st, S.song.stepTable()[st], S.song.stepSeconds); } },
+  simulateSteps(n) { for (let i = 0; i < n; i++) { const st = i % S.song.steps; audio.onLogicStep(st); audio.onStep(st, S.song.stepTable()[st], S.song.stepSeconds); } },
 };
