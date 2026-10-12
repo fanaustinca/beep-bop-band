@@ -39,7 +39,7 @@ await T('all 50 robots build, render, and have unique designs per family', async
 });
 await T('every robot dances: a hit moves its rig away from the idle pose', async () => {
   const still = await E(() => {
-    const pose = (b) => { const a = []; b.root.updateMatrixWorld(true); b.root.traverse((o) => o.isMesh && a.push(...o.matrixWorld.elements.slice(12, 15))); return a; };
+    const pose = (b) => { const a = []; b.root.updateMatrixWorld(true); b.root.traverse((o) => a.push(...o.matrixWorld.elements.slice(12, 15))); return a; };
     const bad = [];
     for (const e of RO.stage.robots.values()) {
       const b = e.bot;
@@ -70,6 +70,31 @@ await T('robot picker thumbnails render (non-empty portraits)', async () => {
   assert(!r.length, 'empty thumbnails: ' + JSON.stringify(r));
 });
 
+await T('robots dance choreographed routines on the beat (not just per-note twitches)', async () => {
+  const r = await E(() => {
+    const st = RO.stage; st.manual = true; st.playing = true;
+    st.groove = { b: 0, beatDur: 0.5, bpb: 4 };
+    const pose = (b) => { const a = []; b.root.updateMatrixWorld(true); b.root.traverse((o) => a.push(...o.matrixWorld.elements.slice(12, 15))); return a; };
+    for (let i = 0; i < 60; i++) { for (const e of st.robots.values()) e.bot.hit(0.5, 0.5, 0.25); st.update(1 / 60); }
+    const out = [];
+    for (const e of st.robots.values()) {
+      // a real dance changes pose from beat to beat across the 8-beat routine
+      st.groove.b = 0.95; st.update(0.0001); const a = pose(e.bot);
+      let d = 0;
+      for (let k = 1; k < 8; k++) { st.groove.b = k + 0.95; st.update(0.0001); const b = pose(e.bot); for (let i = 0; i < a.length; i++) d = Math.max(d, Math.abs(a[i] - b[i])); }
+      if (d < 0.05) out.push(`${e.r.def.id}(${e.r.def.move}) ${d.toFixed(3)}`);
+    }
+    st.manual = false; st.playing = false; st.groove = null;
+    return out;
+  });
+  assert(!r.length, 'robots whose routine barely changes between beats: ' + r.join(', '));
+});
+await T('draw calls stay low with all 50 robots (rigid skinning)', async () => {
+  const calls = await E(() => { const st = RO.stage; st.lineup(); st.update(0.016); st.renderer.render(st.scene, st.camera); return st.renderer.info.render.calls; });
+  console.log(`      (${calls} draw calls for the 50-robot lineup)`);
+  assert(calls < 900, 'too many draw calls: ' + calls);
+});
+
 console.log('\nLevel 1 with real mouse input');
 await T('clicking 4 grid cells satisfies the request, a full loop wins the show', async () => {
   await E(() => RO.startLevel(1));
@@ -84,7 +109,7 @@ await T('clicking 4 grid cells satisfies the request, a full loop wins the show'
   assert(st.ok, 'request not satisfied');
   await E(() => RO.simulateSteps(RO.S.song.steps + 1));
   await page.waitForFunction(() => document.getElementById('win').classList.contains('show'), { timeout: 30000 }).catch(() => {});
-  const w = await E(() => ({ won: RO.S.won, modal: document.getElementById('win').classList.contains('show'), stars: JSON.parse(localStorage.getItem('robot-orchestra.progress')).stars[1] }));
+  const w = await E(() => ({ won: RO.S.won, modal: document.getElementById('win').classList.contains('show'), stars: JSON.parse(localStorage.getItem('beep-bop-band.progress')).stars[1] }));
   assert(w.won && w.modal, 'win modal not shown');
   assert(w.stars === 3, 'expected 3 stars, got ' + w.stars);
   await shot(page, 'e2e-win.png');
@@ -139,11 +164,15 @@ await T('Tone.js clock drives the robots on the beat', async () => {
     const orig = RO.audio.onStep, origL = RO.audio.onLogicStep;
     RO.audio.onLogicStep = (st) => { steps++; hits += RO.S.song.stepTable()[st].length; origL(st); };
     RO.audio.onStep = (s, ev, d) => { frames++; orig(s, ev, d); };
+    await RO.audio.prepare();
+    let started = 0; const on = RO.audio._note.bind(RO.audio);
+    RO.audio._note = (...a) => { const v = RO.audio.voices.get(a[0].uid); const n = v ? v.live.length : 0; on(...a); if (v && (v.live.length > n || v.live.length >= 10)) started++; };
     RO.setPlaying(true);
     await new Promise((res) => setTimeout(res, 2500));
     RO.setPlaying(false);
+    RO.audio._note = on;
     RO.audio.onStep = orig; RO.audio.onLogicStep = origL;
-    return { steps, hits, frames, voices: RO.audio.voices.size, ctx: RO.audio.ready, piano: !!RO.audio.pianoBuffers, bpm: RO.S.song.settings.bpm };
+    return { steps, hits, frames, started, samples: RO.audio.bank.buf.size, voices: RO.audio.voices.size, ctx: RO.audio.ready, piano: !!RO.audio.pianoBuffers, bpm: RO.S.song.settings.bpm };
   });
   assert(r.ctx, 'audio not ready');
   assert(r.piano, 'piano samples failed to load');
@@ -152,6 +181,8 @@ await T('Tone.js clock drives the robots on the beat', async () => {
   assert(r.frames > 0, 'no visual step callbacks reached the robots');
   assert(r.steps >= expected * 0.7, `only ${r.steps} steps in 2.5s (expected ~${expected.toFixed(0)})`);
   assert(r.hits > 0, 'no notes triggered');
+  assert(r.samples > 0, 'no instrument samples were rendered');
+  assert(r.started > 0, 'notes were scheduled but no sample voices started');
 });
 
 console.log('\nFree play');
@@ -182,6 +213,55 @@ await T('free play song persists across reloads', async () => {
   await page.waitForFunction(() => window.RO && window.RO.ready);
   const m = await E(() => RO.S.song.robots.length);
   assert(m === n, `reloaded ${m} robots, expected ${n}`);
+});
+
+console.log('\nSong Book & share codes');
+await T('Song Book: every song loads into Free Play, "Everybody Jam" fields all 50 robots', async () => {
+  const r = await E(async () => {
+    RO.openBook();
+    const cards = document.querySelectorAll('#bookGrid .song').length;
+    const out = [];
+    for (const d of RO.SONGS) { await RO.loadSong(RO.buildSong(d), { name: d.title }); out.push([d.id, RO.S.song.robots.length, RO.S.song.noteCount(), document.getElementById('levelName').textContent]); }
+    return { cards, out, mode: RO.S.mode };
+  });
+  assert(r.cards === 10, 'expected 10 song cards, got ' + r.cards);
+  assert(r.mode === 'free', 'songs load into free play');
+  for (const [id, n, notes, name] of r.out) assert(n > 0 && notes > 0 && name.length, `${id}: ${n} robots / ${notes} notes / "${name}"`);
+  assert(r.out.find((x) => x[0] === 'jam')[1] === 50, 'jam should have 50 robots');
+});
+await T('Song Book "Play" button loads and plays a song', async () => {
+  await E(() => RO.openBook());
+  await page.click('[data-song="ode"]');
+  await page.waitForFunction(() => RO.audio.playing, { timeout: 30000 });
+  const r = await E(() => ({ name: document.getElementById('levelName').textContent, n: RO.S.song.robots.length }));
+  await E(() => RO.setPlaying(false));
+  assert(r.name === 'Ode to Joy' && r.n === 7, JSON.stringify(r));
+});
+await T('share code: copy from the Share dialog, paste back in, get the same song', async () => {
+  await E(async () => { await RO.loadSong(RO.buildSong(RO.SONGS.find((s) => s.id === 'disco')), { name: 'Robot Disco' }); await RO.openShare(); });
+  const code = await E(() => document.getElementById('shareCode').value);
+  assert(/^BEEP1[zr][A-Za-z0-9_-]+$/.test(code), 'bad code: ' + code);
+  const before = await E(() => JSON.stringify(RO.S.song.serialize()));
+  await E(async () => { await RO.loadSong(RO.buildSong(RO.SONGS[0]), { name: 'x' }); await RO.openShare(true); });
+  await page.type('#loadCode', code);
+  await page.click('#loadBtn');
+  await page.waitForFunction(() => !document.getElementById('share').classList.contains('show'));
+  const after = await E(() => JSON.stringify(RO.S.song.serialize()));
+  await E(() => RO.setPlaying(false));
+  assert(after === before, 'loaded song differs from the shared one');
+  await E(() => RO.openShare(true));
+  await page.type('#loadCode', 'BEEP1zgarbage!!');
+  await page.click('#loadBtn');
+  const err = await E(() => document.getElementById('loadErr').textContent);
+  assert(err.length > 0, 'bad code should show an error');
+  await E(() => document.getElementById('share').classList.remove('show'));
+});
+await T('a ?song= share link opens the song', async () => {
+  const code = await E(() => RO.encode(RO.buildSong(RO.SONGS.find((s) => s.id === 'twinkle'))));
+  const p3 = await browser.newPage();
+  await p3.goto(BASE + '?test&song=' + code, { waitUntil: 'domcontentloaded' });
+  await p3.waitForFunction(() => window.RO && RO.S.mode === 'free' && RO.S.song.robots.length === 6, { timeout: 60000 });
+  await p3.close();
 });
 
 console.log('\nLayout');

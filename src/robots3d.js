@@ -4,16 +4,22 @@
 import * as THREE from 'three';
 import { RoundedBoxGeometry } from 'three/addons/geometries/RoundedBoxGeometry.js';
 import { mergeGeometries } from 'three/addons/utils/BufferGeometryUtils.js';
+import { dance } from './dances.js';
 
 const TAU = Math.PI * 2;
 const geoCache = new Map();
 const G = (key, make) => { let g = geoCache.get(key); if (!g) geoCache.set(key, (g = make())); return g; };
-const rbox = (w, h, d, r = 0.05) => G(`rb${w},${h},${d},${r}`, () => new RoundedBoxGeometry(w, h, d, 3, Math.min(r, w / 2 - 1e-3, h / 2 - 1e-3, d / 2 - 1e-3)));
-const caps = (r, len) => G(`cap${r},${len}`, () => new THREE.CapsuleGeometry(r, len, 5, 14));
-const sph = (r, ws = 20, hs = 14) => G(`sp${r},${ws}`, () => new THREE.SphereGeometry(r, ws, hs));
-const cyl = (rt, rb, h, s = 24, open = false) => G(`cy${rt},${rb},${h},${s},${open}`, () => new THREE.CylinderGeometry(rt, rb, h, s, 1, open));
-const tor = (r, t, arc = TAU) => G(`to${r},${t},${arc}`, () => new THREE.TorusGeometry(r, t, 8, 28, arc));
-const lathe = (key, pts, seg = 28) => G('la' + key, () => new THREE.LatheGeometry(pts.map(([x, y]) => new THREE.Vector2(x, y)), seg));
+// segment counts scale with part size: tiny joints/rings/fingers don't need hero-level detail
+// (a 50-robot stage drops from ~0.8M to ~0.35M triangles with no visible difference)
+const rbox = (w, h, d, r = 0.05) => G(`rb${w},${h},${d},${r}`, () => new RoundedBoxGeometry(w, h, d, Math.max(w, h, d) < 0.08 ? 1 : 2, Math.min(r, w / 2 - 1e-3, h / 2 - 1e-3, d / 2 - 1e-3)));
+const caps = (r, len) => G(`cap${r},${len}`, () => new THREE.CapsuleGeometry(r, len, r < 0.04 ? 2 : 4, r < 0.04 ? 8 : 12));
+const sph = (r, ws = 20, hs = 14) => {
+  if (r < 0.03) { ws = Math.min(ws, 8); hs = Math.min(hs, 6); } else if (r < 0.09) { ws = Math.min(ws, 14); hs = Math.min(hs, 10); }
+  return G(`sp${r},${ws},${hs}`, () => new THREE.SphereGeometry(r, ws, hs));
+};
+const cyl = (rt, rb, h, s = 24, open = false) => { if (Math.max(rt, rb) < 0.06) s = Math.min(s, 12); return G(`cy${rt},${rb},${h},${s},${open}`, () => new THREE.CylinderGeometry(rt, rb, h, s, 1, open)); };
+const tor = (r, t, arc = TAU) => G(`to${r},${t},${arc}`, () => new THREE.TorusGeometry(r, t, t < 0.02 ? 5 : 8, r < 0.12 ? 18 : 28, arc));
+const lathe = (key, pts, seg = 24) => G('la' + key, () => new THREE.LatheGeometry(pts.map(([x, y]) => new THREE.Vector2(x, y)), seg));
 
 // ---------- materials ----------
 const matCache = new Map();
@@ -405,38 +411,9 @@ function buildPerc(k, rig) {
 
 const BUILDERS = { piano: buildPiano, keys: buildKeys, synth: buildSynth, pad: buildPad, brass: buildBrass, pluck: buildPluck, bass: buildBass, drum: buildDrum, perc: buildPerc };
 
-// ---------- dance moves ----------
-// Each move: (rig, p 0..1, e = sin envelope, dir ±1 alternating per hit, h = note height 0..1)
+// ---------- dancing ----------
+// Choreographed routines live in dances.js; each note adds a short accent (glow, instrument reaction, pop).
 const ease = (p) => (p < 0.5 ? 2 * p * p : 1 - Math.pow(-2 * p + 2, 2) / 2);
-const A = (rig, i) => rig.arms[i % rig.arms.length];
-const BIG = new Set(['spin', 'backflip', 'jump', 'armSpin']);
-const MOVES = {
-  nodTap(r, p, e) { r.head.rotation.x += 0.35 * e; for (const a of r.arms) a.elbow.rotation.x -= 0.35 * e; },
-  keySweep(r, p, e, d) { r.torso.rotation.y += 0.3 * d * e; for (const a of r.arms) { a.pivot.rotation.x -= 0.7 * e; a.pivot.rotation.z += d * 0.4 * e; } },
-  stomp(r, p, e, d) { const lift = Math.sin(Math.PI * Math.min(1, p * 1.7)); if (r.legs.length) r.legs[d > 0 ? 1 : 0].rotation.x -= 0.9 * lift; r.body.position.y -= p > 0.55 ? 0.05 * (1 - p) / 0.45 : 0; r.torso.rotation.z += 0.08 * d * e; },
-  clap(r, p, e) { const c = Math.sin(Math.PI * Math.min(1, p * 2)); for (const a of r.arms.slice(0, 2)) { a.pivot.rotation.x -= 1.2 * c; a.pivot.rotation.z -= a.side * 0.5 * c; } r.head.rotation.x += 0.15 * e; },
-  headShake(r, p) { r.head.rotation.y += 0.45 * Math.sin(p * 4 * Math.PI) * (1 - p); },
-  pulseSquat(r, p, e) { r.body.position.y -= 0.07 * e; r.torso.scale.set(1 + 0.06 * e, 1 - 0.08 * e, 1 + 0.06 * e); },
-  pump(r, p, e, d) { const a = A(r, d > 0 ? 1 : 0); a.pivot.rotation.x -= 2.6 * e; a.elbow.rotation.x -= 0.6 * e; r.body.position.y += 0.05 * e; },
-  sway(r, p, e, d) { r.flip.rotation.z += 0.16 * d * e; r.head.rotation.z -= 0.12 * d * e; },
-  float(r, p, e) { r.body.position.y += 0.16 * e; for (const a of r.arms) a.pivot.rotation.z += a.side * 0.8 * e; },
-  fanfare(r, p, e) { r.torso.rotation.x -= 0.22 * e; for (const a of r.arms) a.pivot.rotation.x -= 1.3 * e; r.head.rotation.x -= 0.2 * e; },
-  strumLean(r, p, e, d) { r.torso.rotation.z += 0.14 * d * e; A(r, 1).pivot.rotation.x += 0.5 * Math.sin(p * Math.PI * 2); r.head.rotation.x += 0.15 * e; },
-  armSpin(r, p, e, d) { const a = A(r, d > 0 ? 1 : 0), b = A(r, d > 0 ? 0 : 1); a.pivot.rotation.x -= TAU * ease(p); b.pivot.rotation.x += 0.6 * e; if (r.arms.length > 2) { A(r, 2).pivot.rotation.x += TAU * ease(p); } },
-  robotPop(r, p, e, d) { const q = Math.min(1, Math.floor(p * 4 + 1) / 4), s = Math.sin(q * Math.PI); A(r, 0).pivot.rotation.z -= d * 1.4 * s; A(r, 0).elbow.rotation.z += d * 1.5 * s; A(r, 1).pivot.rotation.z += -d * 0.6 * s; r.head.rotation.y += 0.4 * d * (q < 0.5 ? 1 : -1) * s; },
-  bounce(r, p) { const y = Math.abs(Math.sin(Math.PI * p)); r.body.position.y += 0.1 * y; r.torso.scale.y *= 1 - 0.06 * (1 - y) * (p < 0.2 ? 1 : 0); },
-  twist(r, p, e, d) { r.torso.rotation.y += 0.6 * d * e; r.head.rotation.y -= 0.25 * d * e; for (const a of r.arms) a.pivot.rotation.x += a.side * d * 0.5 * e; },
-  spin(r, p) { r.flip.rotation.y += TAU * ease(p); },
-  drumRoll(r, p, e) { const w = Math.sin(p * 6 * Math.PI) * e; A(r, 0).pivot.rotation.x -= 0.45 * w; A(r, 1).pivot.rotation.x += 0.45 * w; r.head.rotation.x += 0.12 * e; },
-  jump(r, p) { const y = 4 * p * (1 - p); r.flip.position.y += 0.32 * y; for (const l of r.legs) l.rotation.x -= 0.6 * y; for (const a of r.arms) a.pivot.rotation.z += a.side * 1.0 * y; },
-  shimmy(r, p, e) { r.torso.rotation.z += 0.12 * Math.sin(p * 6 * Math.PI) * e; r.torso.rotation.y += 0.1 * Math.cos(p * 6 * Math.PI) * e; },
-  wave(r, p, e, d) { const a = A(r, d > 0 ? 1 : 0); a.pivot.rotation.z += a.side * 2.5 * e; a.elbow.rotation.z += a.side * 0.6 * Math.sin(p * 4 * Math.PI) * e; },
-  backflip(r, p) { const y = 4 * p * (1 - p); r.flip.position.y += 0.55 * y; r.flip.rotation.x -= TAU * ease(p); },
-  slidePush(r, p, e, d) { for (const a of r.arms) { a.pivot.rotation.x -= 1.4 * e; a.elbow.rotation.x += 0.3 * e; } r.torso.position.z += 0.05 * d * e; },
-  nod(r, p, e) { r.head.rotation.x += 0.28 * e; r.body.position.y -= 0.03 * e; },
-  point(r, p, e, d) { const a = A(r, d > 0 ? 1 : 0); a.pivot.rotation.z += a.side * 2.3 * e; a.pivot.rotation.x -= 0.4 * e; r.torso.rotation.y += 0.2 * d * e; r.flip.rotation.z -= 0.08 * d * e; },
-  stompWalk(r, p, e, d) { r.flip.position.x += 0.04 * d * e; r.body.position.y -= 0.04 * Math.abs(Math.sin(p * 2 * Math.PI)); r.torso.rotation.z += 0.1 * d * e; },
-};
 
 // family "instrument reactions" (glows, keys, rings, bells...) on top of the dance move
 function react(rig, p, e, t) {
@@ -489,30 +466,34 @@ export function buildRobot(def) {
   const phase = def.index * 1.37;
   root.traverse((o) => { if (o.isMesh) o.userData.robot = def.id; });
 
-  const state = { hitT: -1, dur: 0.4, dir: 1, h: 0.5, glow: 0, big: BIG.has(def.move) };
+  const state = { hitT: -1, dur: 0.3, h: 0.5, glow: 0, acc: 0, energy: 0, lastHit: -99, now: 0, big: false, k: -1 };
 
+  /** A note sounded: accent + keep the robot dancing for a while. */
   function hit(intensity = 1, h = 0.5, stepDur = 0.25) {
-    const running = state.hitT >= 0 && state.hitT < state.dur;
-    if (state.big && running && state.hitT / state.dur < 0.75) { state.glow = 1; return; }
-    state.dir = -state.dir;
     state.hitT = 0;
     state.h = h;
-    state.dur = state.big ? 0.72 : Math.min(0.55, Math.max(0.24, stepDur * 2.2));
+    state.dur = Math.min(0.4, Math.max(0.2, stepDur * 1.6));
+    state.acc = Math.min(1, 0.5 + 0.5 * intensity);
     state.glow = Math.min(1, 0.6 + 0.4 * intensity);
+    state.lastHit = state.now;
     if (rig.extras.panel) for (const m of rig.extras.panel) m.material.emissiveIntensity = Math.random() < 0.5 ? 3 : 0.15;
     if (rig.extras.keys) { for (const kk of rig.extras.keys) kk.material = keyWhite(); const i = Math.floor(Math.random() * rig.extras.keys.length); rig.extras.keys[i].material = k.glow; rig.extras.keys[(i + 2) % rig.extras.keys.length].material = k.glow; }
   }
 
-  function update(dt, t, beat) {
+  /**
+   * groove = { b: absolute beat position, bpb: beats per bar, beatDur: seconds } while the band
+   * plays (null when stopped). The robot dances its routine while it has played recently.
+   */
+  function update(dt, t, beat, groove) {
+    state.now = t;
     for (const [o, s] of rest) { o.position.copy(s.p); o.rotation.copy(s.r); o.scale.copy(s.s); }
-    // idle: breathing + gentle look-around (+ groove bob on the beat while the band plays)
+    // idle: breathing + gentle look-around
     const breath = Math.sin(t * 2.1 + phase);
     rig.torso.scale.y *= 1 + 0.012 * breath;
-    rig.head.rotation.y += 0.1 * Math.sin(t * 0.45 + phase);
+    rig.head.rotation.y += 0.1 * Math.sin(t * 0.45 + phase) * (1 - state.energy);
     rig.head.rotation.x += 0.03 * Math.sin(t * 0.8 + phase * 2);
     for (const a of rig.arms) a.pivot.rotation.x += 0.04 * Math.sin(t * 1.3 + phase + a.side);
     if (rig.hover) body.position.y += 0.05 * Math.sin(t * 1.6 + phase);
-    body.position.y -= (rig.heavy ? 0.035 : 0.022) * beat;
     if (rig.extras.rings) rig.extras.rings.forEach((rg, i) => (rg.rotation.z = t * (0.4 + i * 0.25) * (i ? -1 : 1)));
     if (rig.extras.orbs) for (const o of rig.extras.orbs) o.rotation.y = t * 1.1 + o.userData.phase;
     if (rig.extras.halo) rig.extras.halo.rotation.y += t * 1.5;
@@ -520,16 +501,24 @@ export function buildRobot(def) {
     if (rig.extras.gyro) rig.extras.gyro.rotation.z = Math.sin(t * 3 + phase) * 0.3;
     if (rig.extras.plume) rig.extras.plume.scale.y = 0.85 + 0.15 * Math.sin(t * 20 + phase);
     if (rig.extras.tips) rig.extras.tips.forEach((tp, i) => tp.scale.setScalar(1 + 0.15 * Math.sin(t * 4 + i)));
-    // active move
-    let e = 0;
+    // dance energy: up quickly when notes play, fades about a bar after the robot goes quiet
+    const win = groove ? Math.max(1.2, groove.beatDur * groove.bpb * 1.15) : 0.6;
+    const target = t - state.lastHit < win ? 1 : 0;
+    state.energy += (target - state.energy) * Math.min(1, dt * (target > state.energy ? 6 : 1.6));
+    if (state.energy > 0.002) {
+      const b = groove ? groove.b : t * 2;
+      const bpb = groove ? groove.bpb : 4;
+      // spins/flips only start at a pose boundary when the robot is fully in the groove
+      const u = Math.floor(((b * 8) / (2 * bpb)) % 8);
+      if (u !== state.k) { state.k = u; state.big = state.energy > 0.7; }
+      dance(rig, def.move, b, bpb, ease(Math.min(1, state.energy)), state.big);
+    } else body.position.y -= (rig.heavy ? 0.035 : 0.022) * beat;
+    // note accent: a quick pop + the family's instrument reaction
     if (state.hitT >= 0) {
       state.hitT += dt;
-      const p = Math.min(1, state.hitT / state.dur);
-      e = Math.sin(Math.PI * p);
-      MOVES[def.move](rig, p, e, state.dir, state.h);
+      const p = Math.min(1, state.hitT / state.dur), e = Math.sin(Math.PI * p);
       react(rig, p, e, t);
-      if (rig.def.family !== 'pad' && rig.def.family !== 'bass' && rig.legs.length === 0) { /* no legs: nothing extra */ }
-      // melodic robots tilt their heads with the pitch
+      body.position.y += 0.035 * state.acc * e;
       rig.head.rotation.x -= (state.h - 0.5) * 0.35 * e;
       if (p >= 1) state.hitT = -1;
     }
@@ -545,28 +534,66 @@ export function buildRobot(def) {
   return { root, rig, hit, update, def };
 }
 
-/** Merge each group's static child meshes that share a material (far fewer draw calls with 50 robots). */
+/**
+ * Rigid-skin the robot: every static part becomes part of ONE skinned mesh per material, bound
+ * (weight 1) to its nearest animated ancestor, which acts as a bone. The animated joints stay
+ * ordinary Object3Ds that the dances move, and the GPU places the vertices. Takes a robot from
+ * ~40 draw calls to about one per material. Merged geometry is cached per robot design.
+ */
 const mergedCache = new Map();
 function mergeStatic(rig) {
-  const keep = new Set();
-  for (const v of Object.values(rig.extras)) for (const o of [v].flat()) if (o && o.isMesh) keep.add(o);
-  const groups = [];
-  rig.root.traverse((o) => { if (!o.isMesh) groups.push(o); });
-  for (const g of groups) {
-    const byMat = new Map();
-    for (const c of g.children) if (c.isMesh && !c.children.length && !keep.has(c)) (byMat.get(c.material) || byMat.set(c.material, []).get(c.material)).push(c);
-    for (const [mat, list] of byMat) {
-      if (list.length < 2) continue;
-      const geos = list.map((m) => { m.updateMatrix(); const gg = (m.geometry.index ? m.geometry.toNonIndexed() : m.geometry.clone()); gg.applyMatrix4(m.matrix); return gg; });
-      for (const gg of geos) for (const k of Object.keys(gg.attributes)) if (!['position', 'normal', 'uv'].includes(k)) gg.deleteAttribute(k);
-      const merged = mergeGeometries(geos);
-      geos.forEach((gg) => gg.dispose());
-      if (!merged) continue;
-      for (const m of list) g.remove(m);
-      g.add(new THREE.Mesh(merged, mat));
+  const dyn = new Set([rig.root, rig.flip, rig.body, rig.torso, rig.head, ...rig.legs]);
+  for (const a of rig.arms) { dyn.add(a.pivot); dyn.add(a.elbow); }
+  for (const v of Object.values(rig.extras)) for (const o of [v].flat()) if (o && o.isObject3D) dyn.add(o);
+  const holdsDyn = (o) => { let f = false; o.traverse((c) => { if (c !== o && dyn.has(c)) f = true; }); return f; };
+  rig.root.updateMatrixWorld(true);
+  const rootInv = new THREE.Matrix4().copy(rig.root.matrixWorld).invert();
+  const byMat = new Map(); // material → [{ mesh, bone }]
+  rig.root.traverse((o) => {
+    if (!o.isMesh || dyn.has(o) || holdsDyn(o)) return;
+    let b = o.parent; while (!dyn.has(b)) b = b.parent;
+    (byMat.get(o.material) || byMat.set(o.material, []).get(o.material)).push({ mesh: o, bone: b });
+  });
+  const bones = [], boneIdx = new Map();
+  for (const list of byMat.values()) for (const { bone } of list) if (!boneIdx.has(bone)) { boneIdx.set(bone, bones.length); bones.push(bone); }
+  const inverses = bones.map((b) => new THREE.Matrix4().multiplyMatrices(rootInv, b.matrixWorld).invert());
+  const skeleton = new THREE.Skeleton(bones, inverses);
+  const rel = new THREE.Matrix4();
+  let mi = 0;
+  for (const [mat, list] of byMat) {
+    const key = `${rig.def.id}:${mi++}`;
+    let geo = mergedCache.get(key);
+    if (!geo) {
+      const hasUv = list.every(({ mesh }) => mesh.geometry.attributes.uv);
+      const geos = list.map(({ mesh, bone }) => {
+        const g = mesh.geometry.index ? mesh.geometry.toNonIndexed() : mesh.geometry.clone();
+        for (const k of Object.keys(g.attributes)) if (!(k === 'position' || k === 'normal' || (k === 'uv' && hasUv))) g.deleteAttribute(k);
+        g.morphAttributes = {};
+        g.applyMatrix4(rel.multiplyMatrices(rootInv, mesh.matrixWorld));
+        const n = g.attributes.position.count, bi = boneIdx.get(bone);
+        const idx = new Uint16Array(n * 4), w = new Float32Array(n * 4);
+        for (let i = 0; i < n; i++) { idx[i * 4] = bi; w[i * 4] = 1; }
+        g.setAttribute('skinIndex', new THREE.BufferAttribute(idx, 4));
+        g.setAttribute('skinWeight', new THREE.BufferAttribute(w, 4));
+        return g;
+      });
+      geo = geos.length === 1 ? geos[0] : mergeGeometries(geos);
+      if (geos.length > 1) geos.forEach((g) => g.dispose());
+      mergedCache.set(key, geo);
     }
+    for (const { mesh } of list) mesh.parent && mesh.parent.remove(mesh);
+    const sk = new THREE.SkinnedMesh(geo, mat);
+    sk.frustumCulled = false;
+    sk.renderOrder = list[0].mesh.renderOrder;
+    rig.root.add(sk);
+    sk.bind(skeleton, new THREE.Matrix4());
   }
-  void mergedCache;
+  // drop static groups that are now empty
+  let again = true;
+  while (again) {
+    again = false;
+    rig.root.traverse((o) => { if (!again && !o.isMesh && !dyn.has(o) && o.children.length === 0 && o.parent) { o.parent.remove(o); again = true; } });
+  }
 }
 
 let _shadowMat;

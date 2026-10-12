@@ -105,31 +105,144 @@ function buildVoice(preset, pianoBuffers) {
   return { ...v, dispose: () => nodes.forEach((n) => n.dispose()) };
 }
 
+// ---------------------------------------------------------------- sample bank
+// Live Tone.js synths are far too heavy for 50 robots (hundreds of JS-automated oscillators,
+// filters and always-running chorus/tremolo/delay effects). Instead every preset is rendered
+// once per pitch "anchor" in an OfflineAudioContext (off the main thread), and notes are played
+// back as plain AudioBufferSourceNodes, pitched by playbackRate. That costs ~2 native nodes per
+// note on the audio thread and almost no main-thread work, so playback survives heavy frames.
+const ANCHOR = 4; // render a sample every 4 semitones (max ±2 semitone repitch)
+const HOLD = { pad: 2.4 }; // how long the rendered note is held before its release
+const TAIL = { pad: 2.2, piano: 1.4, pluck: 1.6, keys: 1.2, drum: 0, perc: 0 };
+const PERCUSSIVE = new Set(['drum', 'perc', 'pluck']);
+const REL_TC = { pad: 0.35, piano: 0.22, keys: 0.12, brass: 0.05, synth: 0.06, bass: 0.04 };
+const MAX_VOICES_PER_ROBOT = 10;
+// loudness targets (RMS of the first 300 ms) so every robot sits in the mix regardless of its patch
+const TARGET_RMS = { piano: 0.055, keys: 0.045, synth: 0.038, pad: 0.03, brass: 0.042, pluck: 0.05, bass: 0.075, drum: 0.1, perc: 0.035 };
+const PRESET_TRIM = { snare: 0.6, rim: 0.45, hat: 0.6, shaker: 0.6, tambourine: 0.75, kick808: 1.1, sub: 0.85, clap: 0.9 };
+
+const anchorOf = (fam, midi) => (fam === 'drum' || fam === 'perc' ? 60 : Math.round(midi / ANCHOR) * ANCHOR);
+const renderLen = (fam, preset) => (fam === 'drum' || fam === 'perc' ? (preset === 'kick808' ? 1.4 : 0.8) : (HOLD[fam] || 1.2) + (TAIL[fam] ?? 0.6) + (preset === 'arp' || preset === 'shimmer' ? 1 : 0));
+
+class SampleBank {
+  constructor(engine) { this.engine = engine; this.buf = new Map(); this.pending = new Map(); this.queue = []; this.active = 0; this.bytes = 0; this.gains = new Map(); }
+  key(preset, anchor) { return preset + ':' + anchor; }
+  get(preset, anchor) { return this.buf.get(this.key(preset, anchor)); }
+  /** Best available sample for a note: exact anchor, else the nearest rendered anchor of that preset. */
+  find(preset, fam, midi) {
+    const a = anchorOf(fam, midi);
+    const hit = this.get(preset, a);
+    if (hit) return { buffer: hit, anchor: a };
+    let best = null;
+    for (let d = ANCHOR; d <= 36 && !best; d += ANCHOR) for (const x of [a - d, a + d]) { const b = this.get(preset, x); if (b && !best) best = { buffer: b, anchor: x }; }
+    return best;
+  }
+  /** Queue a render (priority = lower runs first). Resolves when the sample exists. */
+  want(preset, fam, midi, priority = 1) {
+    const anchor = anchorOf(fam, midi), k = this.key(preset, anchor);
+    if (this.buf.has(k)) return Promise.resolve();
+    let p = this.pending.get(k);
+    if (p) { if (priority < p.priority) { p.priority = priority; this.queue.sort((x, y) => x.priority - y.priority); } return p.promise; }
+    let resolve;
+    const promise = new Promise((r) => (resolve = r));
+    p = { k, preset, fam, anchor, priority, promise, resolve };
+    this.pending.set(k, p);
+    this.queue.push(p);
+    this.queue.sort((x, y) => x.priority - y.priority);
+    this._pump();
+    return promise;
+  }
+  get busy() { return this.pending.size; }
+  _pump() {
+    while (this.active < 3 && this.queue.length) {
+      const job = this.queue.shift();
+      this.active++;
+      this._render(job).catch((e) => console.warn('render failed', job.k, e)).finally(() => {
+        this.active--; this.pending.delete(job.k); job.resolve(); this._pump();
+        this.engine.onBankProgress && this.engine.onBankProgress(this.pending.size);
+      });
+    }
+  }
+  async _render({ k, preset, fam, anchor }) {
+    const len = renderLen(fam, preset), hold = HOLD[fam] || 1.2;
+    const pianoBuffers = this.engine.pianoBuffers;
+    // Build the patch inside an offline context synchronously (several renders run in parallel,
+    // so the global context must never be left swapped across an await), then render it.
+    const real = Tone.getContext();
+    const ctx = new Tone.OfflineContext(1, len, real.sampleRate);
+    Tone.setContext(ctx);
+    try {
+      const v = buildVoice(preset, pianoBuffers);
+      v.out.toDestination();
+      v.play(0.005, anchor, PERCUSSIVE.has(fam) ? 0.3 : hold, 0.85);
+    } finally { Tone.setContext(real); }
+    const ab = await ctx.render();
+    // trim trailing silence so short notes don't hold big buffers
+    const d = ab.getChannelData(0);
+    let end = d.length - 1;
+    while (end > 0 && Math.abs(d[end]) < 1e-4) end--;
+    const n = Math.min(d.length, end + 256);
+    const raw = Tone.getContext().rawContext;
+    const trimmed = raw.createBuffer(1, Math.max(1, n), ab.sampleRate);
+    trimmed.copyToChannel(d.subarray(0, n), 0);
+    // 4 ms fade-out so a cut never clicks
+    const ch = trimmed.getChannelData(0), f = Math.min(n, Math.round(ab.sampleRate * 0.004));
+    for (let i = 0; i < f; i++) ch[n - 1 - i] *= i / f;
+    // loudness-normalise: one gain per preset (from its first render) so pitch dynamics stay natural
+    if (!this.gains.has(preset)) {
+      const w = Math.min(n, Math.round(ab.sampleRate * 0.3));
+      let ss = 0, pk = 0;
+      for (let i = 0; i < w; i++) ss += ch[i] * ch[i];
+      for (let i = 0; i < n; i++) pk = Math.max(pk, Math.abs(ch[i]));
+      const rms = Math.sqrt(ss / Math.max(1, w)) || 1e-3;
+      let gain = ((TARGET_RMS[fam] || 0.08) * (PRESET_TRIM[preset] || 1)) / rms;
+      gain = Math.min(gain, 12, 0.95 / Math.max(pk, 1e-3));
+      this.gains.set(preset, gain);
+    }
+    const gain = this.gains.get(preset);
+    for (let i = 0; i < n; i++) ch[i] *= gain;
+    this.buf.set(k, trimmed);
+    this.bytes += n * 4;
+  }
+}
+
 export class AudioEngine {
   constructor() {
     this.ready = false;
-    this.voices = new Map(); // robot uid → { voice, channel, send, preset }
+    this.voices = new Map(); // robot uid → { gain, pan, send, live: [{ src, g, end }] }
+    this.bank = new SampleBank(this);
     this.step = 0;
+    this.abs = 0; // steps since play (for the dance clock)
     this.playing = false;
-    this.onStep = null; // (step, events, dur) called on the animation frame of that step (visuals)
+    this.onStep = null; // (step, events, dur, absStep) called on the animation frame of that step (visuals)
     this.onLogicStep = null; // (step) called on the audio clock for every step (game logic)
     this.onEnded = null;
     this.onLoop = null;
+    this.onBankProgress = null;
     this.volume = 0;
   }
 
   async init() {
     if (this.ready) return;
+    // "balanced" output buffering + a generous scheduling look-ahead: notes are queued 150 ms
+    // ahead on the audio thread, so a slow 3D frame on the main thread can't make them late.
+    if (Tone.getContext().state !== 'running') {
+      try { Tone.setContext(new Tone.Context({ latencyHint: 'balanced', lookAhead: 0.15 })); } catch { /* keep default */ }
+    }
     await Tone.start();
-    Tone.getContext().lookAhead = 0.08;
+    Tone.getContext().lookAhead = 0.15;
     Tone.getDraw().expiration = 0.5;
+    const raw = (this.raw = Tone.getContext().rawContext);
     this.master = new Tone.Volume(this.volume);
     const comp = new Tone.Compressor(-16, 3), limiter = new Tone.Limiter(-1);
     this.master.chain(comp, limiter, Tone.getDestination());
     this.reverb = new Tone.Reverb({ decay: 2.6, preDelay: 0.02, wet: 1 }).connect(this.master);
     this.applauseNoise = new Tone.NoiseSynth({ noise: { type: 'pink' }, envelope: { attack: 0.3, decay: 1.2, sustain: 0.4, release: 1.5 }, volume: -18 }).connect(new Tone.Filter(2500, 'bandpass').connect(this.master));
-    this.chime = poly(Tone.FMSynth, { harmonicity: 3, modulationIndex: 2, envelope: { attack: 0.001, decay: 0.8, sustain: 0, release: 0.6 }, volume: -10 });
+    this.chime = poly(Tone.FMSynth, { harmonicity: 3, modulationIndex: 2, envelope: { attack: 0.001, decay: 0.8, sustain: 0, release: 0.6 }, volume: -10 }, 6);
     this.chime.connect(this.reverb); this.chime.connect(this.master);
+    // native entry points for the per-robot strips
+    this.masterIn = raw.createGain(); Tone.connect(this.masterIn, this.master);
+    this.reverbIn = raw.createGain(); Tone.connect(this.reverbIn, this.reverb);
     try {
       const base = import.meta.env.BASE_URL + 'samples/piano/';
       const bufs = await Promise.all(PIANO_NOTES.map((n) => Tone.ToneAudioBuffer.fromUrl(base + n + '.mp3')));
@@ -151,27 +264,98 @@ export class AudioEngine {
     if (this.ready) { Tone.getTransport().bpm.value = song.settings.bpm; this._reschedule(); this.syncRobots(); }
   }
 
-  /** Create voices for new robots, drop voices for removed ones, apply volume/pan. */
+  /**
+   * Make sure every note in the song has a rendered sample. Each robot's most common pitch is
+   * rendered first so the whole band can sound (via nearest-sample repitching) within a moment.
+   * Resolves when everything is rendered.
+   */
+  prepare() {
+    if (!this.ready || !this.song) return Promise.resolve();
+    const song = this.song, first = [], rest = [];
+    for (const r of song.robots) {
+      const fam = r.def.family, notes = song.visibleNotes(r);
+      const mids = notes.length ? notes.map((n) => song.midi(r, n.row)) : [song.isMelodic(r) ? song.baseMidi(r) + 7 : 60];
+      const counts = new Map();
+      for (const m of mids) { const a = anchorOf(fam, m); counts.set(a, (counts.get(a) || 0) + 1); }
+      const ranked = [...counts.entries()].sort((x, y) => y[1] - x[1]);
+      first.push(this.bank.want(r.def.preset, fam, ranked[0][0], 0));
+      for (const [a] of ranked.slice(1)) rest.push(this.bank.want(r.def.preset, fam, a, 1));
+    }
+    return Promise.all([...first, ...rest]);
+  }
+  /** Resolves once every robot has at least one sample (so pressing play is never silent). */
+  prepareFirst() {
+    if (!this.ready || !this.song) return Promise.resolve();
+    const song = this.song;
+    return Promise.all(song.robots.map((r) => {
+      const fam = r.def.family, notes = song.visibleNotes(r);
+      const m = notes.length ? song.midi(r, notes[0].row) : song.isMelodic(r) ? song.baseMidi(r) + 7 : 60;
+      return this.bank.find(r.def.preset, fam, m) ? null : this.bank.want(r.def.preset, fam, m, 0);
+    }));
+  }
+
+  /** Create mixer strips for new robots, drop strips for removed ones, apply volume/pan/mute. */
   syncRobots(panFor = this.panFor) {
     if (!this.ready || !this.song) return;
     this.panFor = panFor;
-    const live = new Set();
+    const live = new Set(), raw = this.raw, now = raw.currentTime;
     for (const r of this.song.robots) {
       live.add(r.uid);
       let v = this.voices.get(r.uid);
       if (!v) {
-        const voice = buildVoice(r.def.preset, this.pianoBuffers);
-        const channel = new Tone.Channel({ volume: r.volume, pan: 0 }).connect(this.master);
-        const send = new Tone.Gain(REVERB_SEND[r.def.family] || 0.15).connect(this.reverb);
-        voice.out.connect(channel); channel.connect(send);
-        v = { voice, channel, send };
+        const gain = raw.createGain(), pan = raw.createStereoPanner(), send = raw.createGain();
+        gain.connect(pan); pan.connect(this.masterIn); pan.connect(send); send.connect(this.reverbIn);
+        send.gain.value = REVERB_SEND[r.def.family] || 0.15;
+        v = { gain, pan, send, live: [] };
         this.voices.set(r.uid, v);
       }
-      v.channel.volume.value = r.volume;
-      v.channel.mute = r.muted;
-      if (panFor) v.channel.pan.value = Math.max(-0.8, Math.min(0.8, panFor(r)));
+      const g = r.muted ? 0 : Math.pow(10, r.volume / 20);
+      v.gain.gain.setTargetAtTime(g, now, 0.015);
+      if (panFor) v.pan.pan.setTargetAtTime(Math.max(-0.8, Math.min(0.8, panFor(r))), now, 0.02);
     }
-    for (const [uid, v] of this.voices) if (!live.has(uid)) { v.voice.dispose(); v.channel.dispose(); v.send.dispose(); this.voices.delete(uid); }
+    // ~uncorrelated parts add up as √n: keep a big band from slamming the limiter
+    const n = this.song.robots.filter((r) => !r.muted).length;
+    const head = Math.min(1, 2.8 / Math.sqrt(Math.max(1, n)));
+    this.masterIn.gain.setTargetAtTime(head, now, 0.05);
+    this.reverbIn.gain.setTargetAtTime(head, now, 0.05);
+    for (const [uid, v] of this.voices) if (!live.has(uid)) {
+      v.gain.gain.setTargetAtTime(0, now, 0.02);
+      setTimeout(() => { v.gain.disconnect(); v.pan.disconnect(); v.send.disconnect(); }, 200);
+      this.voices.delete(uid);
+    }
+    this.prepare();
+  }
+
+  /** Start one note on a robot's strip at audio time t. */
+  _note(r, t, midi, len, vel) {
+    const v = this.voices.get(r.uid);
+    if (!v) return;
+    const fam = r.def.family;
+    const s = this.bank.find(r.def.preset, fam, midi);
+    if (!s) { this.bank.want(r.def.preset, fam, midi, 0); return; }
+    if (s.anchor !== anchorOf(fam, midi)) this.bank.want(r.def.preset, fam, midi, 0);
+    const raw = this.raw, src = raw.createBufferSource(), g = raw.createGain();
+    src.buffer = s.buffer;
+    const semis = fam === 'drum' || fam === 'perc' ? r.transpose : midi - s.anchor;
+    if (semis) src.playbackRate.value = Math.pow(2, semis / 12);
+    g.gain.value = vel / 0.85;
+    src.connect(g); g.connect(v.gain);
+    src.start(t);
+    let end = t + s.buffer.duration / (src.playbackRate.value || 1);
+    const tc = REL_TC[fam];
+    if (tc && len < (HOLD[fam] || 1.2)) {
+      g.gain.setTargetAtTime(0, t + len, tc);
+      end = Math.min(end, t + len + tc * 7);
+    }
+    src.stop(end);
+    src.onended = () => { g.disconnect(); };
+    // voice cap per robot: fade out the oldest
+    v.live = v.live.filter((x) => x.end > t);
+    v.live.push({ src, g, end });
+    if (v.live.length > MAX_VOICES_PER_ROBOT) {
+      const old = v.live.shift();
+      try { old.g.gain.setTargetAtTime(0, t, 0.01); old.src.stop(t + 0.06); } catch { /* already stopped */ }
+    }
   }
 
   _reschedule() {
@@ -199,23 +383,26 @@ export class AudioEngine {
     const dur = song.stepSeconds;
     for (const e of events) {
       if (e.r.muted) continue;
-      const v = this.voices.get(e.r.uid);
-      if (!v) continue;
       const fam = e.r.def.family;
       const len = fam === 'pad' ? dur * 1.9 : fam === 'brass' || fam === 'synth' || fam === 'bass' ? dur * 0.92 : Math.max(dur, 0.25);
-      v.voice.play(time, e.midi, len, 0.85);
+      this._note(e.r, time, e.midi, len, 0.85);
     }
-    Tone.getDraw().schedule(() => this.onStep && this.onStep(step, events, dur), time);
+    const abs = this.abs;
+    Tone.getDraw().schedule(() => this.onStep && this.onStep(step, events, dur, abs), time);
+    this.abs++;
     this.step = step + 1;
     if (this.step >= song.steps) { this.step = 0; this._played = true; }
   }
 
   setBpm(bpm) { if (this.ready) Tone.getTransport().bpm.rampTo(bpm, 0.05); }
   settingsChanged() { if (this.ready) { this.setBpm(this.song.settings.bpm); if (this._spb !== this.song.settings.stepsPerBeat) this._reschedule(); this.syncRobots(); } }
+  /** Notes changed: render any new pitches in the background. */
+  notesChanged() { if (this.ready) this.prepare(); }
 
   play() {
     if (!this.ready) return;
-    this.step = 0; this._played = false; this.playing = true;
+    if (this.raw.state !== 'running') this.raw.resume();
+    this.step = 0; this.abs = 0; this._played = false; this.playing = true;
     const t = Tone.getTransport();
     t.stop(); t.position = 0; t.start('+0.05');
   }
@@ -224,13 +411,20 @@ export class AudioEngine {
     if (!this.ready) return;
     Tone.getTransport().stop();
     this.step = 0;
+    // quick fade on anything still ringing
+    const now = this.raw.currentTime;
+    for (const v of this.voices.values()) {
+      for (const x of v.live) if (x.end > now) { try { x.g.gain.setTargetAtTime(0, now, 0.03); x.src.stop(now + 0.2); } catch { /* ended */ } }
+      v.live = [];
+    }
   }
 
   /** Audition one note right now (when clicking a cell). */
   preview(r, midi) {
-    if (!this.ready) return;
-    const v = this.voices.get(r.uid);
-    if (v && !r.muted) v.voice.play(Tone.now() + 0.01, midi, 0.3, 0.8);
+    if (!this.ready || r.muted) return;
+    const fam = r.def.family;
+    if (this.bank.find(r.def.preset, fam, midi)) this._note(r, this.raw.currentTime + 0.01, midi, 0.3, 0.8);
+    else { const t0 = performance.now(); this.bank.want(r.def.preset, fam, midi, -1).then(() => { if (performance.now() - t0 < 400) this._note(r, this.raw.currentTime + 0.01, midi, 0.3, 0.8); }); }
   }
 
   setMasterVolume(db) { this.volume = db; if (this.master) this.master.volume.value = db; }
@@ -249,4 +443,4 @@ export class AudioEngine {
   }
 }
 
-export { FAMILIES };
+export { FAMILIES, buildVoice, Tone };

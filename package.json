@@ -1,9 +1,9 @@
 {
-  "name": "robot-orchestra",
+  "name": "beep-bop-band",
   "version": "1.0.0",
   "private": true,
   "type": "module",
-  "description": "Robot Orchestra: Perform for the Audience — a 3D rhythm-puzzle sequencer game",
+  "description": "Beep Bop Band — a 3D rhythm-puzzle sequencer game with a 50-robot orchestra",
   "scripts": {
     "dev": "vite --port 8941 --host",
     "build": "vite build",

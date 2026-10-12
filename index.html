@@ -3,8 +3,8 @@
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
-  <title>Robot Orchestra: Perform for the Audience</title>
-  <meta name="description" content="A 3D rhythm-puzzle sequencer: program a band of 50 dancing robots to win over the audience." />
+  <title>Beep Bop Band</title>
+  <meta name="description" content="Beep Bop Band: a 3D rhythm-puzzle sequencer. Program a band of 50 dancing robots to win over the audience." />
   <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>🤖</text></svg>" />
   <link rel="preconnect" href="https://fonts.googleapis.com" />
   <link href="https://fonts.googleapis.com/css2?family=Nunito:wght@500;700;800;900&display=swap" rel="stylesheet" />
@@ -21,7 +21,9 @@
         <div id="meter"><div id="meterFill"></div><div id="meterPerf"></div></div>
         <span id="meterText"></span>
       </div>
-      <button class="pill" id="btnRobots" title="Add or remove robots">🤖 Robots</button>
+      <button class="pill" id="btnSongs" title="Premade happy songs">🎵<span class="lbl"> Songs</span></button>
+      <button class="pill" id="btnShare" title="Share this song as a code, or load one">🔗<span class="lbl"> Share</span></button>
+      <button class="pill" id="btnRobots" title="Add or remove robots">🤖<span class="lbl"> Robots</span></button>
       <button class="iconbtn" id="btnUndo" title="Undo (Ctrl+Z)">↶</button>
     </header>
 
@@ -57,12 +59,14 @@
     <!-- title screen -->
     <div id="title" class="overlay">
       <div class="titlecard">
-        <div class="logo"><span>ROBOT</span><span>ORCHESTRA</span></div>
-        <div class="subtitle">Perform for the Audience</div>
+        <div class="logo"><span>BEEP BOP</span><span>BAND</span></div>
+        <div class="subtitle">A robot orchestra performing for the audience</div>
         <div class="menu">
           <button class="big primary" id="btnCampaign">▶ Play the Campaign</button>
           <button class="big" id="btnFree">🎛️ Free Play <small>all 50 robots</small></button>
+          <button class="big" id="btnBook">🎵 Song Book <small>10 happy songs, ready to play</small></button>
           <div class="row">
+            <button class="mid" id="btnLoadCode">Load a code</button>
             <button class="mid" id="btnHow">How to play</button>
             <button class="mid" id="btnSettings">Settings</button>
           </div>
@@ -73,10 +77,20 @@
 
     <div id="levels" class="overlay modal-ov"><div class="modal wide"><header><h2>Choose a show</h2><button class="iconbtn close" data-close>✕</button></header><div id="levelGrid"></div></div></div>
     <div id="picker" class="overlay modal-ov"><div class="modal wide"><header><h2>Robots on stage <small id="pickCount"></small></h2><div class="hdrbtns"><button class="pill" id="pickAll">Add all 50</button><button class="pill" id="pickRiff">🎲 Riff all quiet robots</button><button class="pill danger" id="pickNone">Remove all</button></div><button class="iconbtn close" data-close>✕</button></header><div id="pickGrid"></div></div></div>
+    <div id="songbook" class="overlay modal-ov"><div class="modal wide"><header><h2>🎵 Song Book <small>happy songs, ready to play</small></h2><div class="hdrbtns"><button class="pill" id="bookCode">🔗 Load a code</button></div><button class="iconbtn close" data-close>✕</button></header><div id="bookGrid"></div></div></div>
+    <div id="share" class="overlay modal-ov"><div class="modal"><header><h2>🔗 Share &amp; load</h2><button class="iconbtn close" data-close>✕</button></header>
+      <div class="form share">
+        <div class="lsec">This song's code</div>
+        <textarea id="shareCode" readonly rows="4" spellcheck="false"></textarea>
+        <div class="row"><button class="mid" id="copyCode">📋 Copy code</button><button class="mid" id="copyLink">🔗 Copy link</button><span id="shareInfo"></span></div>
+        <div class="lsec">Load a code</div>
+        <textarea id="loadCode" rows="3" spellcheck="false" placeholder="Paste a BEEP1… code or a share link"></textarea>
+        <div class="row"><button class="mid primaryish" id="loadBtn">▶ Load &amp; play</button><span id="loadErr"></span></div>
+      </div></div></div>
     <div id="win" class="overlay modal-ov"><div class="modal center"><div class="ovation">👏 Standing ovation! 👏</div><h2 id="winTitle"></h2><div id="winStars"></div><p id="winText"></p><div class="row"><button class="mid" id="winStay">Keep jamming</button><button class="mid" id="winLevels">Levels</button><button class="big primary" id="winNext">Next show ▶</button></div></div></div>
     <div id="settings" class="overlay modal-ov"><div class="modal"><header><h2>Settings</h2><button class="iconbtn close" data-close>✕</button></header>
       <div class="form">
-        <label>Graphics <select id="quality"><option value="high">High (bloom, 2× res)</option><option value="medium">Medium (bloom)</option><option value="low">Low (fastest)</option></select></label>
+        <label>Graphics <select id="quality"><option value="high">High (bloom, sharp)</option><option value="medium">Medium (bloom)</option><option value="low">Low (fastest, for older laptops)</option></select></label>
         <label>Volume <input type="range" id="volume" min="-30" max="6" value="0" /></label>
         <div class="row"><button class="mid" id="unlockAll">Unlock all levels</button><button class="mid danger" id="resetProgress">Reset progress</button></div>
       </div></div></div>

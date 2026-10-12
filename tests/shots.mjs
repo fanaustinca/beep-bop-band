@@ -29,5 +29,9 @@ if (which === 'all' || which === 'screens') {
   await snap('?test&fresh&level=50', 'level50.png');
   await snap('?test&fresh&free', 'free.png');
   await snap('?test&fresh&level=10', 'mobile.png', null, { width: 390, height: 844 });
+  await snap('?test&fresh&free', 'songbook.png', () => RO.openBook());
+  await snap('?test&fresh&free', 'share.png', () => RO.openShare());
+  await snap('?test&fresh&free', 'songbook-phone.png', () => RO.openBook(), { width: 390, height: 844 });
+  await snap('?test&fresh', 'jam50.png', async () => { await RO.loadSong(RO.buildSong(RO.SONGS.find((s) => s.id === 'jam')), { name: 'Everybody Jam!' }); RO.stage.playing = true; RO.stage.groove = { b: 2.6, beatDur: 0.5, bpb: 4 }; for (const e of RO.stage.robots.values()) e.bot.hit(1, 0.5, 0.25); }, { wait: 800 });
 }
 await browser.close(); srv.close();

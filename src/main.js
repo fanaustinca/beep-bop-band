@@ -1,5 +1,5 @@
 import { Stage } from './stage.js';
-import { AudioEngine } from './audio.js';
+import { AudioEngine, buildVoice, Tone } from './audio.js';
 import { Sequencer } from './sequencer.js';
 import { Song } from './song.js';
 import { LEVELS, FANS, levelSong } from './levels.js';
@@ -7,15 +7,22 @@ import { evaluateAll, hint, solve } from './audience.js';
 import { ROBOTS, ROBOT_BY_ID, FAMILIES, FAMILY_ORDER, MOVE_LABELS, MAX_ROBOTS } from './catalog.js';
 import { PRESET_LABELS } from './presets.js';
 import { SCALES, LEVEL_SCALES, midiName } from './music.js';
+import { SONGS, buildSong } from './songbook.js';
+import { encode, decode, shareUrl } from './share.js';
 
 const $ = (id) => document.getElementById(id);
 const app = $('app');
 const params = new URLSearchParams(location.search);
+const KEY = 'beep-bop-band.';
 const store = {
-  get(k, d) { try { const v = localStorage.getItem('robot-orchestra.' + k); return v ? JSON.parse(v) : d; } catch { return d; } },
-  set(k, v) { try { localStorage.setItem('robot-orchestra.' + k, JSON.stringify(v)); } catch { /* storage unavailable */ } },
+  get(k, d) { try { const v = localStorage.getItem(KEY + k); return v ? JSON.parse(v) : d; } catch { return d; } },
+  set(k, v) { try { localStorage.setItem(KEY + k, JSON.stringify(v)); } catch { /* storage unavailable */ } },
 };
-if (params.has('fresh')) try { Object.keys(localStorage).filter((k) => k.startsWith('robot-orchestra.')).forEach((k) => localStorage.removeItem(k)); } catch { /* ignore */ }
+try {
+  // carry progress over from when the game was called "Robot Orchestra"
+  for (const k of Object.keys(localStorage)) if (k.startsWith('robot-orchestra.')) { const n = KEY + k.slice(16); if (localStorage.getItem(n) == null) localStorage.setItem(n, localStorage.getItem(k)); localStorage.removeItem(k); }
+  if (params.has('fresh')) Object.keys(localStorage).filter((k) => k.startsWith(KEY)).forEach((k) => localStorage.removeItem(k));
+} catch { /* storage unavailable */ }
 
 const prefs = store.get('prefs', { quality: 'high', volume: 0 });
 const progress = store.get('progress', { stars: {} });
@@ -40,10 +47,11 @@ const seq = new Sequencer($('grid'), $('gridwrap'), {
 });
 
 // ---------------------------------------------------------------- audio clock → visuals
-audio.onStep = (step, events, dur) => {
+audio.onStep = (step, events, dur, abs = step) => {
   if (!S.song) return;
   seq.setPlayStep(step);
   const spb = S.song.settings.stepsPerBeat;
+  stage.syncBeat(abs / spb, dur * spb, S.song.settings.beatsPerBar);
   if (step % spb === 0) stage.beat(step % S.song.stepsPerBar === 0 ? 1 : 0.7);
   const per = new Map();
   for (const e of events) {
@@ -149,12 +157,15 @@ function startLevel(n) {
 }
 
 const DEFAULT_FREE = ['pip', 'thump', 'snap', 'tik', 'rumble', 'nimbus', 'zap', 'strum'];
-function startFree() {
+function enterFree(name = 'Jam session') {
   setMode('free');
   S.level = null; S.won = false;
   $('levelNum').textContent = 'Free play';
-  $('levelName').textContent = 'Jam session';
-  stage.ledText = 'FREE PLAY · JAM SESSION';
+  $('levelName').textContent = name;
+  stage.ledText = 'FREE PLAY · ' + name.toUpperCase();
+}
+function startFree() {
+  enterFree(store.get('freeName', 'Jam session'));
   const saved = store.get('free', null);
   let song;
   if (saved && saved.robots && saved.robots.length) song = Song.deserialize(saved);
@@ -165,11 +176,26 @@ function startFree() {
   setSong(song);
   ['levels', 'win'].forEach((id) => showOverlay(id, false));
 }
+/** Load song data (from the Song Book or a share code) into Free Play; ↶ brings back the old song. */
+async function loadSong(data, { name = 'Shared song', play = false } = {}) {
+  setPlaying(false);
+  let keep = [];
+  if (S.mode === 'free' && S.song) { pushUndo(); keep = S.undo; }
+  enterFree(name);
+  ['levels', 'win', 'songbook', 'share', 'picker'].forEach((id) => showOverlay(id, false));
+  setSong(Song.deserialize(data));
+  S.undo = keep;
+  store.set('free', S.song.serialize()); store.set('freeName', name);
+  toast(`🎵 Loaded “${name}”${keep.length ? ' — ↶ to undo' : ''}`);
+  if (play) { await ensureAudio(); if (!audio.playing) await togglePlay(); }
+}
+
 let saveT;
 function saveFree() { if (S.mode !== 'free') return; clearTimeout(saveT); saveT = setTimeout(() => store.set('free', S.song.serialize()), 300); }
 
 // ---------------------------------------------------------------- audience evaluation
 function evaluate() {
+  audio.notesChanged();
   if (S.mode !== 'level') { renderMeter(); return; }
   const prev = S.results;
   S.results = evaluateAll(S.song, S.level.requests);
@@ -317,14 +343,20 @@ $('inspector').addEventListener('input', (e) => {
 // ---------------------------------------------------------------- transport & controls
 function setPlaying(on) {
   if (on) { audio.play(); stage.playing = true; }
-  else { audio.stop(); stage.playing = false; seq.setPlayStep(-1); if (S.mode === 'level' && !S.won) S.perf = 0; }
+  else { audio.stop(); stage.playing = false; stage.stopGroove(); seq.setPlayStep(-1); if (S.mode === 'level' && !S.won) S.perf = 0; }
   $('btnPlay').classList.toggle('on', on);
   if (S.mode === 'level') renderRequests();
   renderMeter();
 }
 async function togglePlay() {
   await ensureAudio();
-  setPlaying(!audio.playing);
+  if (audio.playing) return setPlaying(false);
+  // first play of a big band: wait (briefly) until every robot has a rendered sample
+  if (audio.bank.busy) {
+    toast('🔧 Tuning the robots…');
+    await Promise.race([audio.prepareFirst(), new Promise((r) => setTimeout(r, 4000))]);
+  }
+  setPlaying(true);
 }
 $('btnPlay').onclick = togglePlay;
 
@@ -467,6 +499,46 @@ $('pickNone').onclick = () => { pushUndo(); for (const r of [...S.song.robots]) 
 $('pickRiff').onclick = () => { pushUndo(); let n = 0; for (const r of S.song.robots) if (!S.song.visibleNotes(r).length) { S.song.riff(r); n++; } seq.refresh(); renderRoster(); evaluate(); saveFree(); toast(n ? `🎲 Riffed ${n} robots` : 'Everyone is already playing'); };
 $('btnRobots').onclick = openPicker;
 
+// ---------------------------------------------------------------- song book & share codes
+function openBook() {
+  $('bookGrid').innerHTML = SONGS.map((d) => {
+    const data = buildSong(d), notes = data.robots.reduce((a, r) => a + r.notes.length, 0);
+    return `<div class="song"><div class="em">${d.emoji}</div><div class="t">${esc(d.title)}</div><div class="by">${esc(d.by)}</div>
+      <div class="bl">${esc(d.blurb)}</div><div class="meta">🤖 ${data.robots.length} robots · ${data.settings.bpm} bpm · ${data.settings.beatsPerBar}/4 · ${notes} notes</div>
+      <div class="row"><button class="go" data-song="${d.id}">▶ Play</button><button class="pill" data-songcode="${d.id}" title="Copy this song's share code">📋 Code</button></div></div>`;
+  }).join('');
+  showOverlay('songbook');
+}
+$('bookGrid').addEventListener('click', async (e) => {
+  const p = e.target.closest('[data-song]'), c = e.target.closest('[data-songcode]');
+  if (p) { const d = SONGS.find((x) => x.id === p.dataset.song); loadSong(buildSong(d), { name: d.title, play: true }); }
+  if (c) { const d = SONGS.find((x) => x.id === c.dataset.songcode); copy(await encode(buildSong(d)), `Code for “${d.title}” copied`); }
+});
+async function openShare(focusLoad = false) {
+  $('loadErr').textContent = ''; $('loadErr').classList.remove('bad');
+  const has = S.song && S.mode !== 'title' && S.song.noteCount() > 0;
+  $('shareCode').value = has ? await encode(S.song.serialize()) : '';
+  $('shareCode').placeholder = 'Make some music first, then share it here';
+  $('shareInfo').textContent = has ? `${$('shareCode').value.length} characters` : '';
+  showOverlay('share');
+  if (focusLoad || !has) $('loadCode').focus(); else $('shareCode').select();
+}
+async function copy(text, msg) {
+  try { await navigator.clipboard.writeText(text); toast('📋 ' + msg); }
+  catch { toast('Select the code and press Ctrl+C to copy'); }
+}
+$('copyCode').onclick = () => $('shareCode').value && copy($('shareCode').value, 'Code copied');
+$('copyLink').onclick = () => $('shareCode').value && copy(shareUrl($('shareCode').value), 'Link copied');
+$('loadBtn').onclick = async () => {
+  try { const data = await decode($('loadCode').value); $('loadCode').value = ''; await loadSong(data, { name: 'Shared song', play: true }); }
+  catch (err) { $('loadErr').textContent = err.message; $('loadErr').classList.add('bad'); }
+};
+$('btnSongs').onclick = openBook;
+$('btnShare').onclick = () => openShare();
+$('btnBook').onclick = () => { ensureAudio(); openBook(); };
+$('bookCode').onclick = () => openShare(true);
+$('btnLoadCode').onclick = () => { ensureAudio(); openShare(true); };
+
 // ---------------------------------------------------------------- title, settings, misc
 $('btnCampaign').onclick = () => { ensureAudio(); openLevels(); };
 $('btnFree').onclick = () => { ensureAudio(); startFree(); };
@@ -494,7 +566,7 @@ function showTitleBand() {
   const song = new Song({ bpm: 112 });
   ['pip', 'zap', 'nimbus', 'blare', 'strum', 'rumble', 'thump', 'shaka', 'rhoda', 'laser', 'halo', 'tuba', 'boom', 'clapper', 'harpo', 'acid'].forEach((id) => song.addRobot(id));
   S.song = song;
-  stage.ledText = 'ROBOT ORCHESTRA';
+  stage.ledText = 'BEEP BOP BAND';
   stage.setRobots(song.robots);
   stage.setSelected(null);
 }
@@ -530,11 +602,16 @@ setMode('title');
 showTitleBand();
 if (params.has('lineup')) { setMode('title'); showOverlay('title', false); stage.lineup(params.get('lineup') ? params.get('lineup').split(',') : undefined); }
 else if (params.has('level')) startLevel(+params.get('level'));
+else if (params.has('song')) {
+  decode(params.get('song')).then((data) => { loadSong(data, { name: 'Shared song' }); toast('🎵 A friend shared a song — press ▶ to play'); history.replaceState(null, '', location.pathname); })
+    .catch((err) => toast('Couldn’t load that song link: ' + err.message));
+}
 else if (params.has('free')) startFree();
 
 // test / debug hook
 window.RO = {
-  ready: true, stage, audio, seq, S, LEVELS, ROBOT_BY_ID,
+  dev: params.has('test') ? { Tone, buildVoice } : null,
+  ready: true, stage, audio, seq, S, LEVELS, ROBOT_BY_ID, SONGS, buildSong, encode, decode, loadSong, openBook, openShare,
   startLevel, startFree, select, evaluate, undo, openLevels, openPicker, ensureAudio, setPlaying,
   solveAll() { for (let k = 0; k < 6; k++) for (const q of S.level.requests) solve(S.song, q); S.song.touch(); audio.settingsChanged(); syncControls(); seq.refresh(); renderRoster(); evaluate(); },
   /** Simulate the clock advancing n steps without audio (for headless tests). */

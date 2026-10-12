@@ -17,7 +17,7 @@ export class Stage {
   constructor(container, { quality = 'high' } = {}) {
     this.container = container;
     this.quality = quality;
-    this.renderer = new THREE.WebGLRenderer({ antialias: true, powerPreference: 'high-performance', preserveDrawingBuffer: true });
+    this.renderer = new THREE.WebGLRenderer({ antialias: quality !== 'low', powerPreference: 'high-performance' });
     this.renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, quality === 'high' ? 2 : 1));
     this.renderer.toneMapping = THREE.ACESFilmicToneMapping;
     this.renderer.toneMappingExposure = 0.95;
@@ -70,7 +70,8 @@ export class Stage {
   setQuality(q) {
     this.quality = q;
     this.bloom.enabled = q !== 'low';
-    this.renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, q === 'high' ? 2 : 1));
+    this.renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, q === 'high' ? 1.5 : q === 'medium' ? 1 : 0.75));
+    this.composer.setPixelRatio(this.renderer.getPixelRatio());
     this.resize();
   }
 
@@ -283,6 +284,13 @@ export class Stage {
 
   hit(uid, intensity, h, stepDur) { const e = this.robots.get(uid); if (e) e.bot.hit(intensity, h, stepDur); }
   beat(strength = 1) { this.beatPulse = strength; }
+  /** Lock the dance clock to the audio: `b` = absolute beat (float) heard right now. */
+  syncBeat(b, beatDur, bpb) {
+    const g = this.groove;
+    if (!g || Math.abs(g.b - b) > 0.5 || g.bpb !== bpb) this.groove = { b, beatDur, bpb };
+    else { g.b += (b - g.b) * 0.5; g.beatDur = beatDur; }
+  }
+  stopGroove() { this.groove = null; }
   setSelected(uid) { this.selected = uid; }
   setHype(h) { this.hype = h; }
 
@@ -321,7 +329,7 @@ export class Stage {
       for (let y = H - 4; y > H - h; y -= 6) g.fillRect(i * bw + 1, y, bw - 2, 4);
     }
     g.fillStyle = 'rgba(255,255,255,0.85)'; g.font = 'bold 22px system-ui, sans-serif'; g.textAlign = 'center';
-    g.fillText(this.ledText || 'ROBOT ORCHESTRA', W / 2, 30);
+    g.fillText(this.ledText || 'BEEP BOP BAND', W / 2, 30);
     this.ledTex.needsUpdate = true;
   }
 
@@ -330,9 +338,11 @@ export class Stage {
     const t = this.time;
     this.beatPulse = Math.max(0, this.beatPulse - dt * 4);
     const beat = this.playing ? this.beatPulse : 0;
+    const groove = this.playing ? this.groove : null;
+    if (groove) groove.b += dt / groove.beatDur;
     for (const e of this.robots.values()) {
       e.bot.root.position.lerp(e.target, 1 - Math.pow(0.0015, dt));
-      e.bot.update(dt, t, beat);
+      e.bot.update(dt, t, beat, groove);
     }
     // selection ring
     const sel = this.robots.get(this.selected);
@@ -383,9 +393,14 @@ export class Stage {
     if (this.bloom.enabled) this.composer.render(); else this.renderer.render(this.scene, this.camera);
   }
 
-  _loop() {
+  _loop(now) {
     requestAnimationFrame(this._loop);
     if (this.manual) return;
+    // cap at ~60 fps: high-refresh laptop screens (144–240 Hz) would otherwise render 2–4× as
+    // often and starve the main thread that schedules the audio
+    const min = 1000 / (this.fpsCap || 60);
+    if (this._next && now < this._next - 1) return;
+    this._next = Math.max((this._next || now) + min, now - min);
     const raw = this.clock.getDelta(), dt = Math.min(0.05, raw);
     this._autoQuality(raw);
     this.update(dt);
