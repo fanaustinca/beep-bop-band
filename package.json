@@ -1,0 +1,23 @@
+{
+  "name": "robot-orchestra",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "description": "Robot Orchestra: Perform for the Audience — a 3D rhythm-puzzle sequencer game",
+  "scripts": {
+    "dev": "vite --port 8941 --host",
+    "build": "vite build",
+    "preview": "vite preview --port 8942",
+    "test": "npm run build && node tests/logic.mjs && node tests/e2e.mjs",
+    "test:logic": "node tests/logic.mjs",
+    "test:e2e": "node tests/e2e.mjs"
+  },
+  "dependencies": {
+    "three": "^0.180.0",
+    "tone": "^15.1.22"
+  },
+  "devDependencies": {
+    "puppeteer": "^25.13.0",
+    "vite": "^8.3.4"
+  }
+}

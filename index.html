@@ -1,0 +1,93 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+  <title>Robot Orchestra: Perform for the Audience</title>
+  <meta name="description" content="A 3D rhythm-puzzle sequencer: program a band of 50 dancing robots to win over the audience." />
+  <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>🤖</text></svg>" />
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link href="https://fonts.googleapis.com/css2?family=Nunito:wght@500;700;800;900&display=swap" rel="stylesheet" />
+  <link rel="stylesheet" href="./src/style.css" />
+</head>
+<body>
+  <div id="app" class="mode-title">
+    <!-- top bar -->
+    <header id="topbar">
+      <button class="iconbtn" id="btnMenu" title="Menu">☰</button>
+      <div id="levelTitle"><span id="levelNum"></span><span id="levelName"></span></div>
+      <div id="meterWrap" title="Audience excitement">
+        <span id="meterFace">😐</span>
+        <div id="meter"><div id="meterFill"></div><div id="meterPerf"></div></div>
+        <span id="meterText"></span>
+      </div>
+      <button class="pill" id="btnRobots" title="Add or remove robots">🤖 Robots</button>
+      <button class="iconbtn" id="btnUndo" title="Undo (Ctrl+Z)">↶</button>
+    </header>
+
+    <!-- sequencer -->
+    <section id="seq">
+      <aside id="roster"></aside>
+      <div id="gridwrap"><canvas id="grid"></canvas></div>
+    </section>
+
+    <!-- 3D stage + overlays -->
+    <section id="stagewrap">
+      <div id="stage3d"></div>
+      <div id="requests" class="card"></div>
+      <div id="inspector" class="card"></div>
+      <div id="nametag"></div>
+      <div id="toast"></div>
+    </section>
+
+    <!-- bottom controls (Song Maker style) -->
+    <footer id="controls">
+      <button id="btnPlay" class="play" title="Play / Pause (Space)"><span class="tri"></span></button>
+      <label class="ctl" title="Loop the song"><input type="checkbox" id="loop" checked /><span>Loop</span></label>
+      <div class="ctl tempo"><span>Tempo</span><input type="range" id="tempo" min="50" max="200" /><output id="tempoVal"></output></div>
+      <div class="ctl"><span>Scale</span><select id="scale"></select></div>
+      <div class="ctl"><span>Start on</span><select id="root"></select></div>
+      <div class="ctl time"><span>Beats/bar</span><select id="bpb"></select></div>
+      <div class="ctl time"><span>Split</span><select id="spb"></select></div>
+      <div class="ctl time"><span>Bars</span><select id="bars"></select></div>
+      <div class="ctl free"><span>Range</span><select id="octaves"></select></div>
+      <button class="pill danger" id="btnClear" title="Clear all notes">Clear</button>
+    </footer>
+
+    <!-- title screen -->
+    <div id="title" class="overlay">
+      <div class="titlecard">
+        <div class="logo"><span>ROBOT</span><span>ORCHESTRA</span></div>
+        <div class="subtitle">Perform for the Audience</div>
+        <div class="menu">
+          <button class="big primary" id="btnCampaign">▶ Play the Campaign</button>
+          <button class="big" id="btnFree">🎛️ Free Play <small>all 50 robots</small></button>
+          <div class="row">
+            <button class="mid" id="btnHow">How to play</button>
+            <button class="mid" id="btnSettings">Settings</button>
+          </div>
+        </div>
+        <div class="foot">Click to enable sound · Three.js + Tone.js</div>
+      </div>
+    </div>
+
+    <div id="levels" class="overlay modal-ov"><div class="modal wide"><header><h2>Choose a show</h2><button class="iconbtn close" data-close>✕</button></header><div id="levelGrid"></div></div></div>
+    <div id="picker" class="overlay modal-ov"><div class="modal wide"><header><h2>Robots on stage <small id="pickCount"></small></h2><div class="hdrbtns"><button class="pill" id="pickAll">Add all 50</button><button class="pill" id="pickRiff">🎲 Riff all quiet robots</button><button class="pill danger" id="pickNone">Remove all</button></div><button class="iconbtn close" data-close>✕</button></header><div id="pickGrid"></div></div></div>
+    <div id="win" class="overlay modal-ov"><div class="modal center"><div class="ovation">👏 Standing ovation! 👏</div><h2 id="winTitle"></h2><div id="winStars"></div><p id="winText"></p><div class="row"><button class="mid" id="winStay">Keep jamming</button><button class="mid" id="winLevels">Levels</button><button class="big primary" id="winNext">Next show ▶</button></div></div></div>
+    <div id="settings" class="overlay modal-ov"><div class="modal"><header><h2>Settings</h2><button class="iconbtn close" data-close>✕</button></header>
+      <div class="form">
+        <label>Graphics <select id="quality"><option value="high">High (bloom, 2× res)</option><option value="medium">Medium (bloom)</option><option value="low">Low (fastest)</option></select></label>
+        <label>Volume <input type="range" id="volume" min="-30" max="6" value="0" /></label>
+        <div class="row"><button class="mid" id="unlockAll">Unlock all levels</button><button class="mid danger" id="resetProgress">Reset progress</button></div>
+      </div></div></div>
+    <div id="how" class="overlay modal-ov"><div class="modal"><header><h2>How to play</h2><button class="iconbtn close" data-close>✕</button></header>
+      <div class="howto">
+        <p><b>1. Read the requests.</b> The audience tells you what they want to hear (top-left of the stage).</p>
+        <p><b>2. Program your robots.</b> Pick a robot in the list on the left (or click it on stage). Melodic robots get the big pitch grid: click or drag to place notes; higher rows are higher notes, shaded rows are the "home" note. Drum and percussion robots get one lane each under the grid.</p>
+        <p><b>3. Perform!</b> Press <kbd>Space</kbd> or ▶. When every request is met, play the loop all the way through to fill the meter and earn a standing ovation.</p>
+        <p><b>Tips:</b> 🎲 Riff writes a pattern for the selected robot. 💡 on a request explains it. Change a robot's octave and start note in its card. <kbd>Ctrl</kbd>+<kbd>Z</kbd> undoes. Drag the stage to look around.</p>
+      </div></div></div>
+  </div>
+  <script type="module" src="./src/main.js"></script>
+</body>
+</html>
