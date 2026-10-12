@@ -162,6 +162,7 @@ export class Sequencer {
 
   /** Which cell is under the pointer: { r, step, row } or null. */
   _cell(e) {
+    if (this.dirty) this.draw();
     const L = this.L;
     if (!L) return null;
     const rect = this.canvas.getBoundingClientRect();

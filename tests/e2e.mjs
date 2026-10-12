@@ -90,9 +90,9 @@ await T('clicking 4 grid cells satisfies the request, a full loop wins the show'
   await shot(page, 'e2e-win.png');
 });
 await T('drag-painting fills a row and undo restores it', async () => {
-  await E(() => { document.getElementById('win').classList.remove('show'); RO.startLevel(2); });
+  await E(() => { document.getElementById('win').classList.remove('show'); RO.startLevel(2); RO.seq.draw(); });
   await sleep(200);
-  const g = await E(() => { const L = RO.seq.L, rect = document.getElementById('grid').getBoundingClientRect(); return { x0: rect.left + 46 + L.cellW * 0.5, x1: rect.left + 46 + L.cellW * (L.steps - 0.5), y: rect.top + L.percTop + L.laneH / 2 }; });
+  const g = await E(() => { RO.seq.draw(); const L = RO.seq.L, rect = document.getElementById('grid').getBoundingClientRect(); return { x0: rect.left + 46 + L.cellW * 0.5, x1: rect.left + 46 + L.cellW * (L.steps - 0.5), y: rect.top + L.percTop + L.laneH / 2 }; });
   await page.mouse.move(g.x0, g.y); await page.mouse.down();
   for (let i = 1; i <= 12; i++) await page.mouse.move(g.x0 + ((g.x1 - g.x0) * i) / 12, g.y);
   await page.mouse.up();
@@ -157,7 +157,7 @@ await T('Tone.js clock drives the robots on the beat', async () => {
 console.log('\nFree play');
 await T('free play with all 50 robots on stage plays and keeps a usable frame rate', async () => {
   await E(() => { RO.startFree(); RO.openPicker(); });
-  await page.click('#pickAll');
+  await E(() => document.getElementById('pickAll').click());
   await sleep(500);
   const r = await E(async () => {
     const n = RO.S.song.robots.length, playing = RO.S.song.robots.filter((r) => RO.S.song.visibleNotes(r).length).length;
